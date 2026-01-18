@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Polymarket Sure Bet Finder</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .loading { opacity: 0.5; pointer-events: none; }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-100 min-h-screen">
+    <div class="container mx-auto px-4 py-8 max-w-7xl">
+        <!-- Header -->
+        <div class="mb-8">
+            <h1 class="text-3xl font-bold text-white mb-2">Polymarket Sure Bet Finder</h1>
+            <p class="text-gray-400">Top 20 highest and lowest probability bets ending within your time window</p>
+        </div>
+
+        <!-- Filter -->
+        <div class="bg-gray-800 rounded-lg p-6 mb-6">
+            <div class="flex items-end gap-4 flex-wrap">
+                <div>
+                    <label class="block text-sm font-medium text-gray-400 mb-1">Hours to Expiry</label>
+                    <input type="number" id="maxHours" value="168" min="1" max="720"
+                           class="w-32 bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-white focus:ring-2 focus:ring-blue-500">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-400 mb-1">Filter Top %</label>
+                    <input type="number" id="filterTop" value="0" min="0" max="50" step="1"
+                           class="w-32 bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-white focus:ring-2 focus:ring-blue-500"
+                           title="Enter 2 to filter out 99-100% bets (show only 98% and below)">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-400 mb-1">Auto-Refresh (min)</label>
+                    <select id="autoRefresh" class="w-32 bg-gray-700 border border-gray-600 rounded-md px-3 py-2 text-white focus:ring-2 focus:ring-blue-500">
+                        <option value="0">Off</option>
+                        <option value="1">1 min</option>
+                        <option value="5" selected>5 min</option>
+                        <option value="10">10 min</option>
+                        <option value="30">30 min</option>
+                    </select>
+                </div>
+                <button onclick="fetchOpportunities()"
+                        class="bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-6 rounded-md transition-colors">
+                    Search
+                </button>
+                <div id="status" class="text-sm text-gray-400 ml-4">
+                    <span id="statusText">Enter hours and click Search</span>
+                    <div id="nextUpdate" class="text-xs text-gray-500 mt-1"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Results Grid -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <!-- Top Yes Bets -->
+            <div class="bg-gray-800 rounded-lg overflow-hidden">
+                <div class="bg-green-900 px-4 py-3">
+                    <h2 class="text-lg font-semibold text-green-300">Top 20 - Bet YES (Highest Probability)</h2>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="w-full">
+                        <thead class="bg-gray-700">
+                            <tr>
+                                <th class="px-3 py-2 text-left text-xs font-semibold text-gray-300">Market</th>
+                                <th class="px-3 py-2 text-center text-xs font-semibold text-gray-300">Prob</th>
+                                <th class="px-3 py-2 text-center text-xs font-semibold text-gray-300">Time</th>
+                                <th class="px-3 py-2 text-center text-xs font-semibold text-gray-300">Link</th>
+                            </tr>
+                        </thead>
+                        <tbody id="yesBody" class="divide-y divide-gray-700">
+                            <tr><td colspan="4" class="px-3 py-4 text-center text-gray-500">Click Search</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Top No Bets -->
+            <div class="bg-gray-800 rounded-lg overflow-hidden">
+                <div class="bg-red-900 px-4 py-3">
+                    <h2 class="text-lg font-semibold text-red-300">Top 20 - Bet NO (Lowest Yes Probability)</h2>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="w-full">
+                        <thead class="bg-gray-700">
+                            <tr>
+                                <th class="px-3 py-2 text-left text-xs font-semibold text-gray-300">Market</th>
+                                <th class="px-3 py-2 text-center text-xs font-semibold text-gray-300">No Prob</th>
+                                <th class="px-3 py-2 text-center text-xs font-semibold text-gray-300">Time</th>
+                                <th class="px-3 py-2 text-center text-xs font-semibold text-gray-300">Link</th>
+                            </tr>
+                        </thead>
+                        <tbody id="noBody" class="divide-y divide-gray-700">
+                            <tr><td colspan="4" class="px-3 py-4 text-center text-gray-500">Click Search</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <div class="mt-6 text-center text-sm text-gray-500">
+            <p>Data from Polymarket. Not financial advice. Always DYOR.</p>
+        </div>
+    </div>
+
+    <script>
+        const POLYMARKET_API = 'https://gamma-api.polymarket.com';
+
+        // CORS proxy configurations
+        const CORS_PROXIES = [
+            { prefix: 'https://corsproxy.io/?', encode: true },
+            { prefix: 'https://api.allorigins.win/raw?url=', encode: true },
+            { prefix: 'https://proxy.cors.sh/', encode: false },
+            { prefix: 'https://thingproxy.freeboard.io/fetch/', encode: false },
+        ];
+        let workingProxyIndex = -1;
+
+        async function fetchWithProxy(url) {
+            // Try direct first (in case CORS is allowed)
+            try {
+                const response = await fetch(url, { mode: 'cors' });
+                if (response.ok) {
+                    workingProxyIndex = -1;
+                    return response;
+                }
+            } catch (e) {
+                // CORS blocked, try proxies
+            }
+
+            // If we found a working proxy before, try it first
+            if (workingProxyIndex >= 0) {
+                try {
+                    const proxy = CORS_PROXIES[workingProxyIndex];
+                    const proxyUrl = proxy.prefix + (proxy.encode ? encodeURIComponent(url) : url);
+                    const response = await fetch(proxyUrl);
+                    if (response.ok) return response;
+                } catch (e) {
+                    workingProxyIndex = -1;
+                }
+            }
+
+            // Try all CORS proxies
+            for (let i = 0; i < CORS_PROXIES.length; i++) {
+                const proxy = CORS_PROXIES[i];
+                try {
+                    const proxyUrl = proxy.prefix + (proxy.encode ? encodeURIComponent(url) : url);
+                    const response = await fetch(proxyUrl);
+                    if (response.ok) {
+                        workingProxyIndex = i;
+                        return response;
+                    }
+                } catch (e) {
+                    continue;
+                }
+            }
+            throw new Error('Unable to fetch data. CORS proxies may be unavailable.');
+        }
+
+        async function fetchAllEvents(maxHours, filterTop) {
+            const now = new Date();
+            const endDateMax = new Date(now.getTime() + maxHours * 60 * 60 * 1000);
+            const endDateMin = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+            const maxProb = (100 - filterTop) / 100;
+
+            const seenIds = new Set();
+            const allMarkets = [];
+
+            // Fetch from events endpoint (regular and featured)
+            for (const featured of [false, true]) {
+                let offset = 0;
+                while (offset <= 500) {
+                    let url = `${POLYMARKET_API}/events?active=true&closed=false&limit=100&offset=${offset}`;
+                    if (featured) url += '&featured=true';
+
+                    try {
+                        const response = await fetchWithProxy(url);
+                        const events = await response.json();
+                        if (!events || events.length === 0) break;
+
+                        for (const event of events) {
+                            const eventSlug = event.slug || '';
+                            const markets = event.markets || [];
+
+                            for (const market of markets) {
+                                if (market.closed) continue;
+
+                                const conditionId = market.conditionId || '';
+                                if (seenIds.has(conditionId)) continue;
+                                seenIds.add(conditionId);
+
+                                const parsed = parseMarket(market, now, endDateMax, endDateMin, eventSlug);
+                                if (parsed) allMarkets.push(parsed);
+                            }
+                        }
+
+                        if (events.length < 100) break;
+                        offset += 100;
+                    } catch (e) {
+                        console.error('Error fetching events:', e);
+                        break;
+                    }
+                }
+            }
+
+            // Split and filter by probability
+            const yesMarkets = allMarkets
+                .filter(m => m.yesPrice >= 0.5 && m.yesPrice <= maxProb)
+                .sort((a, b) => b.yesPrice - a.yesPrice)
+                .slice(0, 20);
+
+            const noMarkets = allMarkets
+                .filter(m => m.yesPrice < 0.5 && m.noPrice <= maxProb)
+                .sort((a, b) => b.noPrice - a.noPrice)
+                .slice(0, 20);
+
+            return { yesMarkets, noMarkets, totalScanned: allMarkets.length };
+        }
+
+        function parseMarket(market, now, endDateMax, endDateMin, eventSlug) {
+            const endDateStr = market.endDate;
+            if (!endDateStr) return null;
+
+            let endDate;
+            try {
+                endDate = new Date(endDateStr);
+            } catch (e) {
+                return null;
+            }
+
+            // Check time window
+            if (endDate > endDateMax || endDate < endDateMin) return null;
+
+            const outcomePrices = market.outcomePrices;
+            if (!outcomePrices) return null;
+
+            let prices;
+            try {
+                prices = typeof outcomePrices === 'string' ? JSON.parse(outcomePrices) : outcomePrices;
+            } catch (e) {
+                return null;
+            }
+
+            if (!prices || prices.length < 2) return null;
+
+            const yesPrice = parseFloat(prices[0]);
+            const noPrice = parseFloat(prices[1]);
+
+            if (isNaN(yesPrice) || isNaN(noPrice)) return null;
+
+            // Filter out fully resolved markets
+            if (yesPrice <= 0.001 || yesPrice >= 0.999) return null;
+
+            const question = market.question || 'Unknown';
+            const marketSlug = market.marketSlug || market.slug || '';
+
+            let url;
+            if (eventSlug) {
+                url = `https://polymarket.com/event/${eventSlug}`;
+            } else if (marketSlug) {
+                url = `https://polymarket.com/event/${marketSlug}`;
+            } else {
+                url = `https://polymarket.com/event/${market.conditionId || ''}`;
+            }
+
+            // Calculate time remaining
+            const deltaMs = endDate - now;
+            let timeRemaining;
+            if (deltaMs < 0) {
+                const hoursAgo = Math.floor(Math.abs(deltaMs) / (1000 * 60 * 60));
+                const minsAgo = Math.floor((Math.abs(deltaMs) % (1000 * 60 * 60)) / (1000 * 60));
+                timeRemaining = hoursAgo > 0 ? `Ended ${hoursAgo}h ago` : `Ended ${minsAgo}m ago`;
+            } else {
+                const hours = Math.floor(deltaMs / (1000 * 60 * 60));
+                const mins = Math.floor((deltaMs % (1000 * 60 * 60)) / (1000 * 60));
+                timeRemaining = hours > 0 ? `${hours}h ${mins}m` : `${mins}m`;
+            }
+
+            return {
+                question,
+                url,
+                yesPrice,
+                noPrice,
+                timeRemaining,
+                endDate
+            };
+        }
+
+        async function fetchOpportunities() {
+            const maxHours = parseInt(document.getElementById('maxHours').value) || 168;
+            const filterTop = parseInt(document.getElementById('filterTop').value) || 0;
+            const statusText = document.getElementById('statusText');
+            const yesBody = document.getElementById('yesBody');
+            const noBody = document.getElementById('noBody');
+
+            statusText.textContent = 'Fetching from Polymarket...';
+            yesBody.classList.add('loading');
+            noBody.classList.add('loading');
+
+            try {
+                const { yesMarkets, noMarkets, totalScanned } = await fetchAllEvents(maxHours, filterTop);
+
+                renderTable(yesBody, yesMarkets, 'green', true);
+                renderTable(noBody, noMarkets, 'red', false);
+
+                statusText.textContent = `Found ${yesMarkets.length} Yes, ${noMarkets.length} No bets | Scanned: ${totalScanned} | Updated: ${new Date().toLocaleTimeString()}`;
+            } catch (error) {
+                statusText.textContent = `Error: ${error.message}`;
+                yesBody.innerHTML = '<tr><td colspan="4" class="px-3 py-4 text-center text-red-400">Failed to load - CORS proxy may be down</td></tr>';
+                noBody.innerHTML = '<tr><td colspan="4" class="px-3 py-4 text-center text-red-400">Failed to load - CORS proxy may be down</td></tr>';
+            } finally {
+                yesBody.classList.remove('loading');
+                noBody.classList.remove('loading');
+            }
+        }
+
+        function renderTable(tbody, markets, color, isYes) {
+            if (!markets || markets.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="4" class="px-3 py-4 text-center text-gray-500">No bets found</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = markets.map((m, i) => {
+                const prob = ((isYes ? m.yesPrice : m.noPrice) * 100).toFixed(1);
+                const probClass = color === 'green' ? 'text-green-400' : 'text-red-400';
+                return `
+                    <tr class="hover:bg-gray-750">
+                        <td class="px-3 py-2 text-sm text-gray-200">
+                            <div class="truncate max-w-xs" title="${escapeHtml(m.question)}">
+                                ${i + 1}. ${escapeHtml(m.question)}
+                            </div>
+                        </td>
+                        <td class="px-3 py-2 text-center">
+                            <span class="${probClass} font-bold">${prob}%</span>
+                        </td>
+                        <td class="px-3 py-2 text-center text-gray-400 text-sm">${m.timeRemaining}</td>
+                        <td class="px-3 py-2 text-center">
+                            <a href="${m.url}" target="_blank" class="text-blue-400 hover:text-blue-300 text-sm">View</a>
+                        </td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        document.getElementById('maxHours').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') fetchOpportunities();
+        });
+        document.getElementById('filterTop').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') fetchOpportunities();
+        });
+
+        // Auto-refresh functionality
+        let refreshInterval = null;
+        let countdownInterval = null;
+        let nextRefreshTime = null;
+
+        function updateCountdown() {
+            const nextUpdateEl = document.getElementById('nextUpdate');
+            if (!nextRefreshTime) {
+                nextUpdateEl.textContent = '';
+                return;
+            }
+            const remaining = Math.max(0, Math.ceil((nextRefreshTime - Date.now()) / 1000));
+            const mins = Math.floor(remaining / 60);
+            const secs = remaining % 60;
+            nextUpdateEl.textContent = `Next update in ${mins}:${secs.toString().padStart(2, '0')}`;
+        }
+
+        function setupAutoRefresh() {
+            const minutes = parseInt(document.getElementById('autoRefresh').value) || 0;
+
+            // Clear existing intervals
+            if (refreshInterval) clearInterval(refreshInterval);
+            if (countdownInterval) clearInterval(countdownInterval);
+            refreshInterval = null;
+            countdownInterval = null;
+            nextRefreshTime = null;
+
+            if (minutes > 0) {
+                const ms = minutes * 60 * 1000;
+                nextRefreshTime = Date.now() + ms;
+
+                refreshInterval = setInterval(() => {
+                    fetchOpportunities();
+                    nextRefreshTime = Date.now() + ms;
+                }, ms);
+
+                countdownInterval = setInterval(updateCountdown, 1000);
+                updateCountdown();
+            } else {
+                document.getElementById('nextUpdate').textContent = '';
+            }
+        }
+
+        document.getElementById('autoRefresh').addEventListener('change', setupAutoRefresh);
+
+        // Start with auto-refresh on (5 min default)
+        setupAutoRefresh();
+        // Fetch on page load
+        fetchOpportunities();
+    </script>
+</body>
+</html>
